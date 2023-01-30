@@ -118,6 +118,7 @@ my %builtinweb = (
     'noip-ipv6' => {'url' => 'http://ip1.dynupdate6.no-ip.com/'},
     'nsupdate.info-ipv4' => {'url' => 'https://ipv4.nsupdate.info/myip'},
     'nsupdate.info-ipv6' => {'url' => 'https://ipv6.nsupdate.info/myip'},
+    'route53' => {'url' => 'https://checkip.amazonaws.com/'},
     'zoneedit' => {'url' => 'https://dynamic.zoneedit.com/checkip.html'},
 );
 my %builtinfw = (
@@ -841,6 +842,21 @@ my %services = (
             'password' => setv(T_PASSWD, 1, 0, '',            undef),
             'script'   => setv(T_STRING, 1, 1, '/nic/update', undef),
             'server'   => setv(T_FQDNP,  1, 0, 'www.ovh.com', undef),
+        },
+    },
+    'route53' =>{
+        'updateable' => undef,
+        'update'     => \&nic_route53_update,
+        'examples'   => \&nic_route53_examples,
+        'variables' => {
+            %{$variables{'service-common-defaults'}},
+            'hosted_zone_id' => setv(T_STRING, 1, 1, '', undef),
+            'ip'             => setv(T_IP,     0, 1, undef, undef),
+            'login'          => setv(T_LOGIN,  1, 0, '', undef),
+            'password'       => setv(T_PASSWD, 1, 0, '', undef),
+            'server'         => setv(T_FQDNP,  1, 0, 'route53.amazonaws.com', undef),
+            'ttl'            => setv(T_NUMBER, 0, 1, 300, undef),
+            'type'           => setv(T_STRING, 0, 1, 'A', undef),
         },
     },
     'sitelutions' => {
@@ -7384,6 +7400,126 @@ sub nic_keysystems_update {
     }
   }
 }
+
+######################################################################
+## nic_route53_examples
+######################################################################
+sub nic_route53_examples {
+    return <<EoEXAMPLE;
+o 'route53'
+
+The 'route53' protocol is used by the non-free
+dynamic DNS service offered by Amazon Web Services.
+Check http://docs.aws.amazon.com/Route53/latest/DeveloperGuide/Welcome.html for API
+
+Configuration variables applicable to the 'route53' protocol are:
+protocol=route53
+server=route53.amazonaws.com
+password=service-password          ## password (token) registered with the service
+subdomain.example.com              ## the host registered with the service.
+
+Example ${program}.conf file entries:
+## single host update
+protocol=route53,             \\\\
+password=service-password        \\\\
+example.com
+
+EoEXAMPLE
+}
+
+
+######################################################################
+## nic_route53_update
+######################################################################
+sub nic_route53_update {
+    debug("\nnic_route53_update -------------------");
+
+    ## update each configured host
+
+    foreach my $h (@_) {
+        my $ip = delete $config{$h}{'wantip'};
+        info("ROUTE53 setting IP address to %s for %s", $ip, $h);
+
+        my $url = "https://$config{$h}{'server'}/2012-12-12/hostedzone";
+
+        my $headers = {
+            'Content-Type' => 'application/json',
+            'X-Amz-Date' => strftime("%Y%m%dT%H%M%SZ", gmtime()),
+            'X-Amz-Content-Sha256' => 'UNSIGNED-PAYLOAD',
+        };
+
+        my $data = {
+            'Action' => 'GET',
+            'Version' => '2012-12-12',
+            'Name' => $h,
+        };
+
+        my $signature = route53_sign($data, $config{$h}{'password'});
+
+        $url .= "?$signature";
+
+        # Try to get URL
+        my $reply = geturl(
+            proxy    => opt('proxy'),
+            url      => $url,
+            headers  => $headers,
+            method   => 'GET',
+        );
+
+        # No response, declare as failed
+        if (!defined($reply) || !$reply) {
+            failed("ROUTE53 updating %s: Could not connect to %s.", $h, $config{$h}{'server'});
+            last;
+        }
+        last if !header_ok($h, $reply);
+
+        my $response = eval { decode_json($reply) };
+        if (!defined($response)) {
+            $config{$h}{'status'} = "bad";
+
+            failed("%s -- Unexpected service response.", $h);
+            next;
+        }
+
+        my $hostedzoneid = $response->{'HostedZones'}[0]{'Id'};
+        $hostedzoneid =~ s/\/hostedzone\///;
+
+        $url = "https://$config{$h}{'server'}/2012-12-12/hostedzone/$hostedzoneid/rrset";
+
+        $data = {
+            'Action' => 'GET',
+            'Version' => '2012-12-12',
+            'Name' => $h,
+            'Type' => 'A',
+        };
+
+        $signature = route53_sign($data, $config{$h}{'password'});
+
+        $url .= "?$signature";
+
+        # Try to get URL
+        $reply = geturl(
+            proxy    => opt('proxy'),
+            url      => $url,
+            headers  => $headers,
+            method   => 'GET',
+        );
+
+        # No response, declare as failed
+        if (!defined($reply) || !$reply) {
+            failed("ROUTE53 updating %s: Could not connect to %s.", $h, $config{$h}{'server'});
+            last;
+        }
+        last if !header_ok($h, $reply);
+
+        $response = eval { decode_json($reply) };
+        if (!defined($response)) {
+            $config{$h}{'status'} = "bad";
+
+            failed("%s -- Unexpected service response.", $h);
+            next;
+        }
+        
 
 ######################################################################
 ## nic_regfishde_examples
